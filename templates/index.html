@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Jarvis AI</title>
+  <script src="https://kit.fontawesome.com/your-fontawesome-kit.js" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <!-- Overlay: Click to unlock audio (required in many browsers) -->
+  <div id="overlay" onclick="initAudio()">Click anywhere to enable Jarvis</div>
+
+  <div class="container">
+    <header class="chat-header">
+      <h1>Jarvis AI</h1>
+    </header>
+
+    <!-- Main chat box -->
+    <div class="chat-box" id="chat-box"></div>
+
+    <!-- History Button at the bottom -->
+    <div class="button-container">
+      <button id="historyBtn" class="history-button">
+        <i class="fas fa-history"></i> Show History
+      </button>
+    </div>
+
+    <!-- Hidden history container (revealed when button is clicked) -->
+    <div class="chat-box" id="historyContainer" style="display: none;"></div>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}" defer></script>
+</body>
+</html>
