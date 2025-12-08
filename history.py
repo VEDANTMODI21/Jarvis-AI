@@ -5,7 +5,7 @@ try:
     db = mysql.connector.connect(
         host="localhost",
         user="root",
-        password="&Wearegood100",  # change this
+        password="",  # change this
         database="ai_bot"  # change if needed
     )
     cursor = db.cursor()
