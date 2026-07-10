@@ -1,179 +1,331 @@
-from flask import Flask, render_template, request, jsonify
-from datetime import datetime
-import requests
-import mysql.connector
-import wikipedia
 import os
+import re
+import requests
+from datetime import datetime
+
+from flask import Flask, render_template, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
 import openai
+from dotenv import load_dotenv
 
-app = Flask(__name__)
+load_dotenv()
 
-# Add your free API keys here
-OPENWEATHER_API_KEY = "6f1d738593364ed5acd131020250405"
-NEWS_API_KEY = "pub_8476072c0a05f125451fadaeeeaf6281c22f8"
-OPENAI_API_KEY = "sk-abcdef1234567890abcdef1234567890abcdef12"
+DEFAULT_HEADERS = {
+    "User-Agent": "JarvisAI/1.0 (contact@example.com)"
+}
 
-openai.api_key = OPENAI_API_KEY
+app = Flask(__name__, static_folder="public", static_url_path="")
 
-# Database connection
-def get_db_connection():
+# Database
+raw_database_url = os.getenv("DATABASE_URL", "sqlite:///jarvis.db")
+if raw_database_url.startswith("postgres://"):
+    raw_database_url = raw_database_url.replace("postgres://", "postgresql://", 1)
+
+app.config["SQLALCHEMY_DATABASE_URI"] = raw_database_url
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True}
+
+db = SQLAlchemy(app)
+
+# API keys from environment
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+
+openai_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+
+class Message(db.Model):
+    __tablename__ = "messages"
+    id = db.Column(db.Integer, primary_key=True)
+    role = db.Column(db.String(10), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+def create_tables():
     try:
-        return mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="password",
-            database="ai_bot",
-            port=3306
-        )
-    except mysql.connector.Error as err:
-        print(f"Error connecting to database: {err}")
-        return None
+        with app.app_context():
+            db.create_all()
+    except Exception as exc:  # pragma: no cover
+        app.logger.error("Could not create database tables: %s", exc)
 
-# Save messages to the database
-def save_message(user_query, bot_response):
-    conn = get_db_connection()
-    if conn:
-        cursor = conn.cursor()
-        sql = "INSERT INTO messages_library (user_query, bot_response) VALUES (%s, %s)"
-        values = (user_query, bot_response)
-        cursor.execute(sql, values)
-        conn.commit()
-        cursor.close()
-        conn.close()
-    else:
-        print("Database connection failed. Message not saved.")
+
+create_tables()
+
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
-@app.route("/process", methods=["POST"])
-def process():
-    data = request.get_json()
-    command = data.get("message", "").strip().lower()
 
-    if "time" in command:
-        now = datetime.now()
-        response = "The time is " + now.strftime("%I:%M %p")
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", "").strip()
+    if not message:
+        return jsonify({"error": "Message is required"}), 400
 
-    elif "date" in command:
-        now = datetime.now()
-        response = "Today's date is " + now.strftime("%B %d, %Y")
+    try:
+        db.session.add(Message(role="user", content=message))
+        db.session.commit()
 
-    elif "your name" in command:
-        response = "I am Jarvis, your AI assistant."
+        response = process_command(message)
 
-    elif "how are you" in command:
-        response = "I'm doing great, thank you for asking!"
+        db.session.add(Message(role="bot", content=response))
+        db.session.commit()
 
-    elif "weather" in command:
-        response = get_weather("Delhi")
+        return jsonify({"response": response})
+    except Exception as exc:
+        app.logger.exception("Error processing chat")
+        return jsonify({"error": "Failed to process request"}), 500
 
-    elif "news" in command:
-        response = get_news()
 
-    elif "wikipedia" in command:
-        query = command.replace("wikipedia", "").strip()
-        response = get_wikipedia_summary(query)
-
-    elif "open youtube" in command:
-        response = "Opening YouTube..."
-        os.system("start https://www.youtube.com")
-
-    elif "open instagram" in command:
-        response = "Opening Instagram..."
-        os.system("start https://www.instagram.com")
-
-    elif "ask openai" in command:
-        prompt = command.replace("ask openai", "").strip()
-        response = ask_openai(prompt)
-
-    else:
-        response = get_duckduckgo_answer(command)
-
-    save_message(command, response)
-    return jsonify({"response": response})
-
-@app.route("/history", methods=["GET"])
+@app.route("/api/history", methods=["GET"])
 def get_history():
-    conn = get_db_connection()
-    if conn:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM messages_library ORDER BY timestamp DESC LIMIT 20")
-        messages = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return jsonify({"history": messages})
-    else:
-        return jsonify({"error": "Failed to connect to the database"})
-
-def get_duckduckgo_answer(query):
-    url = "https://api.duckduckgo.com/"
-    params = {
-        "q": query,
-        "format": "json",
-        "no_html": 1,
-        "skip_disambig": 1
-    }
     try:
-        res = requests.get(url, params=params, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            abstract = data.get("AbstractText", "")
-            if abstract:
-                return abstract
-            return "Sorry, I couldn't find any information on that."
-        else:
-            return "I'm sorry, I encountered an error fetching information."
-    except Exception as e:
-        print("DuckDuckGo API error:", e)
-        return "I'm sorry, I encountered an error processing your request."
+        messages = (
+            Message.query.order_by(Message.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        return jsonify(
+            {
+                "history": [
+                    {
+                        "id": m.id,
+                        "role": m.role,
+                        "content": m.content,
+                        "created_at": m.created_at.isoformat() if m.created_at else None,
+                    }
+                    for m in messages
+                ]
+            }
+        )
+    except Exception as exc:
+        app.logger.exception("Error loading history")
+        return jsonify({"error": "Failed to load history"}), 500
 
-def get_weather(city):
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
+
+@app.route("/api/history", methods=["DELETE"])
+def clear_history():
     try:
-        res = requests.get(url)
-        data = res.json()
+        Message.query.delete()
+        db.session.commit()
+        return jsonify({"ok": True})
+    except Exception as exc:
+        app.logger.exception("Error clearing history")
+        return jsonify({"error": "Failed to clear history"}), 500
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "time": datetime.utcnow().isoformat()})
+
+
+def process_command(command: str) -> str:
+    text = command.lower()
+
+    if text in ("time", "what time is it", "current time") or "time" in text.split():
+        return f"The time is {datetime.now().strftime('%I:%M %p')}."
+
+    if text in ("date", "what date is it", "today's date") or "date" in text.split():
+        return f"Today's date is {datetime.now().strftime('%B %d, %Y')}."
+
+    if "your name" in text:
+        return "I am Jarvis, your AI assistant."
+
+    if "how are you" in text:
+        return "I'm doing great, thank you for asking!"
+
+    if text.startswith("weather") or " weather" in text or "weather " in text:
+        return get_weather(text)
+
+    if "news" in text:
+        return get_news()
+
+    if "wikipedia" in text:
+        return get_wikipedia_summary(text)
+
+    if text.startswith("open "):
+        return open_website(text)
+
+    if text.startswith("ask openai") or text.startswith("ask ai"):
+        prompt = re.sub(r"^(ask\s+(openai|ai)\s*)", "", command, flags=re.IGNORECASE).strip()
+        return ask_openai(prompt or "Hello")
+
+    # Fallback to OpenAI when available; otherwise DuckDuckGo.
+    if openai_client:
+        return ask_openai(command)
+
+    return get_duckduckgo_answer(command)
+
+
+def get_weather(command: str) -> str:
+    if not OPENWEATHER_API_KEY:
+        return "OpenWeather API key is not configured."
+
+    city = extract_city(command)
+    url = (
+        "https://api.openweathermap.org/data/2.5/weather"
+        f"?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
+    )
+    try:
+        response = requests.get(url, headers=DEFAULT_HEADERS, timeout=10)
+        data = response.json()
         if data.get("main"):
             temp = data["main"]["temp"]
             desc = data["weather"][0]["description"]
-            return f"The weather in {city} is {desc} with {temp}°C temperature."
+            return f"The weather in {city.title()} is {desc} with a temperature of {temp}°C."
+        if data.get("message"):
+            return f"Weather: {data['message']}."
         return "Could not fetch weather details."
-    except:
+    except requests.RequestException as exc:
+        app.logger.error("Weather API error: %s", exc)
         return "Weather service is currently unavailable."
 
-def get_news():
-    url = f"https://newsapi.org/v2/top-headlines?country=in&apiKey={NEWS_API_KEY}"
+
+def extract_city(command: str) -> str:
+    match = re.search(r"weather(?:\s+(?:in|at|for))?\s+([a-zA-Z\s]+)", command, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"(?:in|at|for)\s+([a-zA-Z\s]+)$", command, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return "Delhi"
+
+
+def get_news() -> str:
+    if not NEWS_API_KEY:
+        return "News API key is not configured."
+
+    url = "https://newsapi.org/v2/top-headlines"
+    params = {"country": "in", "apiKey": NEWS_API_KEY, "pageSize": 5}
     try:
-        res = requests.get(url)
-        articles = res.json().get("articles", [])[:3]
+        response = requests.get(url, params=params, headers=DEFAULT_HEADERS, timeout=10)
+        data = response.json()
+        articles = data.get("articles", [])
         if articles:
-            headlines = [f"- {a['title']}" for a in articles]
+            headlines = [f"- {a['title']}" for a in articles if a.get("title")]
             return "Here are the top news headlines:\n" + "\n".join(headlines)
         return "No news found."
-    except:
+    except requests.RequestException as exc:
+        app.logger.error("News API error: %s", exc)
         return "News service is currently unavailable."
 
-def get_wikipedia_summary(query):
-    try:
-        summary = wikipedia.summary(query, sentences=2)
-        return summary
-    except:
-        return "Sorry, I couldn't find anything on Wikipedia."
 
-def ask_openai(prompt):
+def get_wikipedia_summary(command: str) -> str:
+    query = re.sub(r"wikipedia", "", command, flags=re.IGNORECASE).strip()
+    if not query:
+        return "Please tell me what to search for on Wikipedia."
+
+    # Try a direct title match first; fall back to search if it fails.
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+        summary_url = "https://en.wikipedia.org/api/rest_v1/page/summary/"
+        response = requests.get(
+            summary_url + requests.utils.quote(query),
+            headers=DEFAULT_HEADERS,
+            timeout=10,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("extract"):
+                return data["extract"]
+
+        search_url = "https://en.wikipedia.org/w/api.php"
+        search_params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "format": "json",
+            "srlimit": 1,
+        }
+        response = requests.get(search_url, params=search_params, headers=DEFAULT_HEADERS, timeout=10)
+        data = response.json()
+        results = data.get("query", {}).get("search", [])
+        if results:
+            title = results[0]["title"]
+            response = requests.get(
+                summary_url + requests.utils.quote(title),
+                headers=DEFAULT_HEADERS,
+                timeout=10,
+            )
+            if response.status_code == 200:
+                summary = response.json().get("extract")
+                if summary:
+                    return summary
+
+        return "Sorry, I couldn't find anything on Wikipedia."
+    except requests.RequestException as exc:
+        app.logger.error("Wikipedia API error: %s", exc)
+        return "Wikipedia service is currently unavailable."
+
+
+def open_website(command: str) -> str:
+    text = command.lower()
+    sites = {
+        "youtube": "https://www.youtube.com",
+        "instagram": "https://www.instagram.com",
+        "google": "https://www.google.com",
+        "facebook": "https://www.facebook.com",
+        "twitter": "https://www.twitter.com",
+        "x": "https://www.x.com",
+        "github": "https://www.github.com",
+        "linkedin": "https://www.linkedin.com",
+    }
+    for name, url in sites.items():
+        if name in text:
+            return f"Opening {name.title()}: {url}"
+
+    match = re.search(r"open\s+(.+)", text)
+    if match:
+        site = match.group(1).strip().replace(" ", "")
+        return f"Opening https://{site}.com"
+    return "I don't know which site to open."
+
+
+def ask_openai(prompt: str) -> str:
+    if not openai_client:
+        return "OpenAI API key is not configured."
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt}
-            ]
+                {"role": "system", "content": "You are Jarvis, a helpful AI assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=256,
+            temperature=0.7,
         )
         return response.choices[0].message.content.strip()
-    except Exception as e:
-        print("OpenAI API error:", e)
+    except Exception as exc:
+        app.logger.error("OpenAI API error: %s", exc)
         return "Sorry, I couldn't process your request with OpenAI."
 
+
+def get_duckduckgo_answer(query: str) -> str:
+    url = "https://api.duckduckgo.com/"
+    params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
+    try:
+        response = requests.get(url, params=params, headers=DEFAULT_HEADERS, timeout=10)
+        if response.status_code in (200, 202):
+            data = response.json()
+            abstract = data.get("AbstractText", "") or data.get("Abstract", "")
+            if abstract:
+                return abstract
+            related = data.get("RelatedTopics", [])
+            if related:
+                first = related[0]
+                if isinstance(first, dict) and first.get("Text"):
+                    return first["Text"]
+                if isinstance(first, dict) and first.get("Topics"):
+                    return first["Topics"][0].get("Text", "Sorry, I couldn't find any information on that.")
+        return "Sorry, I couldn't find any information on that."
+    except requests.RequestException as exc:
+        app.logger.error("DuckDuckGo API error: %s", exc)
+        return "Sorry, I encountered an error processing your request."
+
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

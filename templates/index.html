@@ -2,33 +2,38 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Jarvis AI</title>
-  <script src="https://kit.fontawesome.com/your-fontawesome-kit.js" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
-  <!-- Overlay: Click to unlock audio (required in many browsers) -->
-  <div id="overlay" onclick="initAudio()">Click anywhere to enable Jarvis</div>
+  <div id="overlay">
+    <div>Click anywhere to enable Jarvis</div>
+    <div class="sub">Microphone access is required for voice commands.</div>
+  </div>
 
   <div class="container">
     <header class="chat-header">
-      <h1>Jarvis AI</h1>
+      <h1>🤖 Jarvis AI</h1>
+      <span id="statusBadge" class="status">Idle</span>
     </header>
 
-    <!-- Main chat box -->
     <div class="chat-box" id="chat-box"></div>
 
-    <!-- History Button at the bottom -->
-    <div class="button-container">
-      <button id="historyBtn" class="history-button">
-        <i class="fas fa-history"></i> Show History
-      </button>
+    <div class="controls">
+      <button id="historyBtn" class="control-btn">History</button>
+      <button id="clearHistoryBtn" class="control-btn">Clear Chat</button>
     </div>
 
-    <!-- Hidden history container (revealed when button is clicked) -->
-    <div class="chat-box" id="historyContainer" style="display: none;"></div>
+    <div class="input-area">
+      <input type="text" id="messageInput" placeholder="Type a message or say &quot;Jarvis&quot;..." autocomplete="off">
+      <button id="micBtn" class="icon-btn" title="Voice command">🎤</button>
+      <button id="sendBtn" class="icon-btn send-btn" title="Send">➤</button>
+    </div>
+
+    <div class="history-panel" id="historyPanel"></div>
   </div>
 
-  <script src="{{ url_for('static', filename='script.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </body>
 </html>
